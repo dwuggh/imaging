@@ -1,0 +1,22 @@
+[package]
+name = "imaging_shader_ext"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shader creation and binding interfaces for imaging backends."
+readme = "README.md"
+keywords = ["graphics", "imaging", "shaders", "rendering"]
+categories = ["graphics", "rendering", "no-std"]
+
+[features]
+default = ["std"]
+std = ["imaging/std"]
+libm = ["imaging/libm"]
+
+[dependencies]
+imaging.workspace = true
+
+[lints]
+workspace = true

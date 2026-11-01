@@ -139,6 +139,11 @@ Images use [`ImageBrush`] and [`ImageBrushRef`] throughout fills, strokes, glyph
 handles without depending on GPU types. Encoded scenes keep the backend resources they sample
 alive, and unsupported or missing bindings produce explicit errors.
 
+Shader brushes use `ShaderBrush` and an opaque `ShaderHandle`. A separate backend
+registry owns compiled programs and immutable uniform bindings; core scenes retain
+only handle identity. The Skia backend supports `SkSL` through `imaging_shader_ext`.
+Unsupported shader brushes and missing registry bindings produce explicit errors.
+
 The API is intentionally small and experimental; expect breaking changes while we iterate.
 
 <!-- cargo-rdme end -->

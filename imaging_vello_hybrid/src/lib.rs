@@ -226,6 +226,8 @@ pub use scene_sink::VelloHybridSceneSink;
 /// Errors that can occur when rendering via Vello hybrid.
 #[derive(Debug)]
 pub enum Error {
+    /// Shader brushes are not supported by this backend.
+    UnsupportedShaderBrush,
     /// The encoded scene belongs to a different renderer.
     WrongRenderer,
     /// An external image has no binding on this renderer.
@@ -654,6 +656,9 @@ fn map_readback_error(err: ReadbackError) -> Error {
 
 fn map_texture_renderer_error(error: Error) -> TextureRendererError {
     match error {
+        Error::UnsupportedShaderBrush => {
+            TextureRendererError::Unsupported(RenderUnsupportedError::UnsupportedShaderBrush)
+        }
         Error::UnboundImage(image) => {
             TextureRendererError::Content(RenderContentError::UnboundImage(image))
         }

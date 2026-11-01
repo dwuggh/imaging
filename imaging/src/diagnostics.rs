@@ -416,7 +416,7 @@ fn draw_is_fully_transparent_glyph_run(draw: &GlyphRunRef<'_>) -> bool {
 fn brush_ref_is_fully_transparent(brush: BrushRef<'_>) -> bool {
     match brush {
         BrushRef::Solid(color) => color.components[3] <= 0.0,
-        BrushRef::Gradient(_) | BrushRef::Image(_) => false,
+        BrushRef::Gradient(_) | BrushRef::Image(_) | BrushRef::Shader(_) => false,
     }
 }
 

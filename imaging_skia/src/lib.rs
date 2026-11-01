@@ -14,6 +14,28 @@
 //! Masks use native Skia layers on raster canvases, GPU canvases, and recorded pictures.
 //! The rendered mask's alpha or luminance modulates the filtered content before compositing.
 //!
+//! # `SkSL` Shader Brushes
+//!
+//! Use `SkiaShaderRegistry` to compile `SkSL` with `imaging_shader_ext::ShaderFactory`,
+//! then bind uniforms to create an immutable `imaging::ShaderHandle`. Pass it through
+//! `imaging::Brush::Shader(imaging::ShaderBrush { shader })` to fills, strokes, or glyph runs.
+//! Shader output must be premultiplied; `layout(color)` uniforms accept unpremultiplied
+//! sRGB colors. Draw opacity and positioning use `Composite::alpha` and `brush_transform`.
+//!
+//! Attach the same registry with `SkiaConfig::with_shader_registry`, or use
+//! `with_shader_registry` on `SkCanvasSink` and `SkPictureRecorderSink`. Scenes retain
+//! handles only: their shader resources must remain registered until replay. Registry
+//! clones share resources; native Skia pictures retain shaders after recording.
+//!
+//! The self-contained `examples/sksl.rs` example compiles one program, binds two sets of
+//! uniforms, and renders a filled and stroked shape to PNG without a GPU or window:
+//!
+//! ```sh
+//! cargo run -p imaging_skia --example sksl -- /tmp/imaging-sksl.png
+//! ```
+//!
+//! The output path is optional and defaults to `sksl.png`.
+//!
 //! # Render A Recorded Scene
 //!
 //! Record commands into [`imaging::record::Scene`], then hand the scene to [`SkiaCpuRenderer`].
@@ -164,6 +186,7 @@ mod ganesh;
 mod gpu_readback;
 #[cfg(all(feature = "gpu", any(target_os = "macos", target_os = "ios")))]
 mod metal;
+mod shader;
 mod sinks;
 #[cfg(all(feature = "gpu", not(any(target_os = "macos", target_os = "ios"))))]
 mod vulkan;
@@ -198,6 +221,7 @@ use crate::gpu_readback::{
 use imaging_wgpu::TextureRenderer;
 #[cfg(feature = "gpu")]
 use imaging_wgpu::{TextureRendererError, TextureTargetError};
+pub use shader::SkiaShaderRegistry;
 pub use sinks::{SkCanvasSink, SkPictureRecorderSink};
 #[cfg(feature = "gpu")]
 pub use wgpu;
@@ -205,6 +229,8 @@ pub use wgpu;
 /// Errors that can occur when rendering via Skia.
 #[derive(Debug)]
 pub enum Error {
+    /// A shader brush is not bound in this renderer's registry.
+    UnboundShader(imaging::ShaderHandle),
     /// The scene is invalid (unbalanced stacks).
     InvalidScene(ValidateError),
     /// No supported Ganesh backend was available for the active platform or `wgpu` backend.
@@ -529,11 +555,12 @@ impl SkiaCacheConfig {
 #[derive(Clone, Debug, Default)]
 pub struct SkiaConfig {
     caches: SkiaCaches,
+    shaders: SkiaShaderRegistry,
     cache_config: SkiaCacheConfig,
 }
 
 impl SkiaConfig {
-    /// Create renderer configuration with fresh default caches and cache budgets.
+    /// Create renderer configuration with fresh caches, an empty shader registry, and default budgets.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -543,6 +570,13 @@ impl SkiaConfig {
     #[must_use]
     pub fn with_caches(mut self, caches: SkiaCaches) -> Self {
         self.caches = caches;
+        self
+    }
+
+    /// Use a shared registry to resolve shader brushes during rendering.
+    #[must_use]
+    pub fn with_shader_registry(mut self, registry: SkiaShaderRegistry) -> Self {
+        self.shaders = registry;
         self
     }
 
@@ -562,6 +596,7 @@ pub struct SkiaCpuRenderer {
     height: i32,
     tolerance: f64,
     caches: SkiaCaches,
+    shaders: SkiaShaderRegistry,
 }
 
 impl Default for SkiaCpuRenderer {
@@ -610,6 +645,7 @@ impl SkiaCpuRenderer {
             height: 1,
             tolerance: 0.1,
             caches: config.caches,
+            shaders: config.shaders,
         }
     }
 
@@ -661,6 +697,7 @@ impl SkiaCpuRenderer {
             Some(self.caches.image_cache()),
             self.caches.font_cache(),
         );
+        sink = sink.with_shader_registry(self.shaders.clone());
         sink.set_tolerance(self.tolerance);
         replay(scene, &mut sink);
         sink.finish()?;
@@ -733,6 +770,7 @@ impl ImageRenderer for SkiaCpuRenderer {
             Some(self.caches.image_cache()),
             self.caches.font_cache(),
         );
+        sink = sink.with_shader_registry(self.shaders.clone());
         sink.set_tolerance(self.tolerance);
         source.paint_into(&mut sink);
         sink.finish().map_err(map_image_renderer_error)?;
@@ -749,10 +787,12 @@ fn encode_source_to_picture<S: RenderSource + ?Sized>(
     tolerance: f64,
     image_cache: Rc<RefCell<ImageCache>>,
     font_cache: SkiaFontCache,
+    shaders: SkiaShaderRegistry,
 ) -> Result<sk::Picture, Error> {
     source.validate().map_err(Error::InvalidScene)?;
     let bounds = kurbo::Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
     let mut sink = SkPictureRecorderSink::new_with_caches(bounds, Some(image_cache), font_cache);
+    sink = sink.with_shader_registry(shaders);
     sink.set_tolerance(tolerance);
     source.paint_into(&mut sink);
     sink.finish_picture()
@@ -766,6 +806,7 @@ struct SkiaGpuRendererState {
     queue: wgpu::Queue,
     tolerance: f64,
     caches: SkiaCaches,
+    shaders: SkiaShaderRegistry,
 }
 
 #[cfg(feature = "gpu")]
@@ -835,6 +876,7 @@ impl SkiaGpuRendererState {
             queue,
             tolerance: 0.1,
             caches: config.caches,
+            shaders: config.shaders,
         })
     }
 
@@ -865,6 +907,7 @@ impl SkiaGpuRendererState {
             Some(self.caches.image_cache()),
             self.caches.font_cache(),
         );
+        sink = sink.with_shader_registry(self.shaders.clone());
         sink.set_tolerance(self.tolerance);
         source.paint_into(&mut sink);
         sink.finish()?;
@@ -943,6 +986,7 @@ impl SkiaRenderer {
             self.state.tolerance,
             self.state.caches.image_cache(),
             self.state.caches.font_cache(),
+            self.state.shaders.clone(),
         )
     }
 
@@ -1117,6 +1161,7 @@ impl ImageRenderer for SkiaRenderer {
             self.state.tolerance,
             self.state.caches.image_cache(),
             self.state.caches.font_cache(),
+            self.state.shaders.clone(),
         )
         .map_err(map_image_renderer_error)?;
         let texture = self.scratch_texture_for_format(target.width, target.height, texture_format);
@@ -1145,6 +1190,9 @@ impl ImageRenderer for SkiaRenderer {
 
 fn map_image_renderer_error(error: Error) -> ImageRendererError {
     match error {
+        Error::UnboundShader(handle) => {
+            ImageRendererError::Content(RenderContentError::UnboundShader(handle))
+        }
         Error::InvalidScene(error) => {
             ImageRendererError::Content(RenderContentError::InvalidScene(error))
         }
@@ -1209,6 +1257,9 @@ fn map_readback_image_error(error: ReadbackError) -> ImageRendererError {
 #[cfg(feature = "gpu")]
 fn map_texture_renderer_error(error: Error) -> TextureRendererError {
     match error {
+        Error::UnboundShader(handle) => {
+            TextureRendererError::Content(RenderContentError::UnboundShader(handle))
+        }
         Error::InvalidScene(error) => {
             TextureRendererError::Content(RenderContentError::InvalidScene(error))
         }
@@ -1773,8 +1824,29 @@ fn brush_to_paint(
     opacity: f32,
     paint_xf: Affine,
     image_cache: Option<&Rc<RefCell<ImageCache>>>,
+    shaders: &SkiaShaderRegistry,
+) -> Result<sk::Paint, Error> {
+    if let imaging::BrushRef::Shader(brush) = brush {
+        let shader = shaders
+            .resolve(&brush.shader)
+            .ok_or_else(|| Error::UnboundShader(brush.shader.clone()))?;
+        let mut paint = sk::Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_shader(shader.with_local_matrix(&affine_to_matrix(paint_xf)));
+        paint.set_alpha_f(opacity.clamp(0.0, 1.0));
+        return Ok(paint);
+    }
+    let brush = brush.as_raster().ok_or(Error::UnsupportedExternalImage)?;
+    raster_brush_to_paint(brush, opacity, paint_xf, image_cache)
+        .ok_or(Error::Internal("invalid image brush"))
+}
+
+fn raster_brush_to_paint(
+    brush: BrushRef<'_>,
+    opacity: f32,
+    paint_xf: Affine,
+    image_cache: Option<&Rc<RefCell<ImageCache>>>,
 ) -> Option<sk::Paint> {
-    let brush = brush.as_raster()?;
     let mut paint = sk::Paint::default();
     paint.set_anti_alias(true);
     let alpha_scale = opacity.clamp(0.0, 1.0);

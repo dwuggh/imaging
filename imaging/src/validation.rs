@@ -382,7 +382,7 @@ where
 
     fn validate_brush(&mut self, brush: BrushRef<'_>) -> bool {
         match brush {
-            BrushRef::Solid(_) => true,
+            BrushRef::Solid(_) | BrushRef::Shader(_) => true,
             BrushRef::Gradient(gradient) => self.validate_gradient(gradient),
             BrushRef::Image(image_brush) => self.validate_image_brush(image_brush),
         }

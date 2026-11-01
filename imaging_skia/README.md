@@ -29,6 +29,28 @@ Skia draw targets and produces an RGBA8 image buffer using Skia.
 Masks use native Skia layers on raster canvases, GPU canvases, and recorded pictures.
 The rendered mask's alpha or luminance modulates the filtered content before compositing.
 
+# `SkSL` Shader Brushes
+
+Use `SkiaShaderRegistry` to compile `SkSL` with `imaging_shader_ext::ShaderFactory`,
+then bind uniforms to create an immutable `imaging::ShaderHandle`. Pass it through
+`imaging::Brush::Shader(imaging::ShaderBrush { shader })` to fills, strokes, or glyph runs.
+Shader output must be premultiplied; `layout(color)` uniforms accept unpremultiplied
+sRGB colors. Draw opacity and positioning use `Composite::alpha` and `brush_transform`.
+
+Attach the same registry with `SkiaConfig::with_shader_registry`, or use
+`with_shader_registry` on `SkCanvasSink` and `SkPictureRecorderSink`. Scenes retain
+handles only: their shader resources must remain registered until replay. Registry
+clones share resources; native Skia pictures retain shaders after recording.
+
+The self-contained `examples/sksl.rs` example compiles one program, binds two sets of
+uniforms, and renders a filled and stroked shape to PNG without a GPU or window:
+
+```sh
+cargo run -p imaging_skia --example sksl -- /tmp/imaging-sksl.png
+```
+
+The output path is optional and defaults to `sksl.png`.
+
 # Render A Recorded Scene
 
 Record commands into [`imaging::record::Scene`], then hand the scene to [`SkiaCpuRenderer`].

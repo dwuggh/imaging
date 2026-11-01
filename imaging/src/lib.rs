@@ -120,6 +120,11 @@
 //! handles without depending on GPU types. Encoded scenes keep the backend resources they sample
 //! alive, and unsupported or missing bindings produce explicit errors.
 //!
+//! Shader brushes use `ShaderBrush` and an opaque `ShaderHandle`. A separate backend
+//! registry owns compiled programs and immutable uniform bindings; core scenes retain
+//! only handle identity. The Skia backend supports `SkSL` through `imaging_shader_ext`.
+//! Unsupported shader brushes and missing registry bindings produce explicit errors.
+//!
 //! The API is intentionally small and experimental; expect breaking changes while we iterate.
 
 #![no_std]
@@ -138,6 +143,7 @@ mod paint;
 mod painter;
 pub mod record;
 pub mod render;
+mod shader;
 pub mod validation;
 
 pub use brush::{Brush, BrushRef, ImageBrush, ImageBrushRef};
@@ -151,6 +157,7 @@ pub use painter::{FillBuilder, GlyphRunBuilder, PaintShape, Painter, StrokeBuild
 pub use render::{
     ImageBufferFormat, ImageBufferTarget, ImageRenderer, ImageRendererError, RenderSource,
 };
+pub use shader::{ShaderBrush, ShaderHandle};
 
 pub use kurbo;
 pub use peniko;

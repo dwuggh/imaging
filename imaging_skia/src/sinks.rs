@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use super::{
-    Error, ImageCache, SkiaFontCache, affine_to_matrix, apply_stroke_style, bez_to_sk_path,
-    brush_to_paint, build_filter_chain, f64_to_f32, geometry_to_bez_path, geometry_to_sk_path,
-    map_blend_mode, path_with_fill_rule, skia_font_from_glyph_run,
+    Error, ImageCache, SkiaFontCache, SkiaShaderRegistry, affine_to_matrix, apply_stroke_style,
+    bez_to_sk_path, brush_to_paint, build_filter_chain, f64_to_f32, geometry_to_bez_path,
+    geometry_to_sk_path, map_blend_mode, path_with_fill_rule, skia_font_from_glyph_run,
 };
 use imaging::{
     BlurredRoundedRect, ClipRef, FillRef, GeometryRef, GlyphRunRef, GroupRef, MaskMode, PaintSink,
@@ -21,6 +21,7 @@ struct StreamState {
     error: Option<Error>,
     clip_depth: u32,
     group_stack: Vec<GroupFrame>,
+    shaders: SkiaShaderRegistry,
 }
 
 #[derive(Debug)]
@@ -52,6 +53,7 @@ impl StreamState {
             error: None,
             clip_depth: 0,
             group_stack: Vec::new(),
+            shaders: SkiaShaderRegistry::new(),
         }
     }
 
@@ -223,18 +225,18 @@ fn draw_glyph_run(
 
     set_matrix(canvas, glyph_run.transform);
 
-    if glyph_run.brush.as_raster().is_none() {
-        state.set_error_once(Error::UnsupportedExternalImage);
-        return;
-    }
-    let Some(mut sk_paint) = brush_to_paint(
+    let mut sk_paint = match brush_to_paint(
         glyph_run.brush,
         glyph_run.composite.alpha,
         glyph_run.brush_transform.unwrap_or(Affine::IDENTITY),
         image_cache,
-    ) else {
-        state.set_error_once(Error::Internal("invalid image brush"));
-        return;
+        &state.shaders,
+    ) {
+        Ok(paint) => paint,
+        Err(error) => {
+            state.set_error_once(error);
+            return;
+        }
     };
     sk_paint.set_blend_mode(map_blend_mode(&glyph_run.composite.blend));
 
@@ -390,6 +392,7 @@ fn replay_scene_into_canvas(
         }
         None => SkCanvasSink::new(canvas),
     };
+    sink = sink.with_shader_registry(state.shaders.clone());
     sink.set_tolerance(state.tolerance);
     replay_transformed(scene, &mut sink, transform);
     if let Err(err) = sink.finish() {
@@ -602,18 +605,18 @@ fn paint_sink_fill(
     }
 
     set_matrix(canvas, draw.transform);
-    if draw.brush.as_raster().is_none() {
-        state.set_error_once(Error::UnsupportedExternalImage);
-        return;
-    }
-    let Some(mut sk_paint) = brush_to_paint(
+    let mut sk_paint = match brush_to_paint(
         draw.brush,
         draw.composite.alpha,
         draw.brush_transform.unwrap_or(Affine::IDENTITY),
         image_cache,
-    ) else {
-        state.set_error_once(Error::Internal("invalid image brush"));
-        return;
+        &state.shaders,
+    ) {
+        Ok(paint) => paint,
+        Err(error) => {
+            state.set_error_once(error);
+            return;
+        }
     };
     sk_paint.set_blend_mode(map_blend_mode(&draw.composite.blend));
     sk_paint.set_style(sk::PaintStyle::Fill);
@@ -662,18 +665,18 @@ fn paint_sink_stroke(
     }
 
     set_matrix(canvas, draw.transform);
-    if draw.brush.as_raster().is_none() {
-        state.set_error_once(Error::UnsupportedExternalImage);
-        return;
-    }
-    let Some(mut sk_paint) = brush_to_paint(
+    let mut sk_paint = match brush_to_paint(
         draw.brush,
         draw.composite.alpha,
         draw.brush_transform.unwrap_or(Affine::IDENTITY),
         image_cache,
-    ) else {
-        state.set_error_once(Error::Internal("invalid image brush"));
-        return;
+        &state.shaders,
+    ) {
+        Ok(paint) => paint,
+        Err(error) => {
+            state.set_error_once(error);
+            return;
+        }
     };
     sk_paint.set_blend_mode(map_blend_mode(&draw.composite.blend));
     apply_stroke_style(&mut sk_paint, draw.stroke);
@@ -745,6 +748,13 @@ impl<'a> SkCanvasSink<'a> {
             font_cache: Some(font_cache),
             state: StreamState::new(),
         }
+    }
+
+    /// Use a shared registry to resolve shader brushes.
+    #[must_use]
+    pub fn with_shader_registry(mut self, registry: SkiaShaderRegistry) -> Self {
+        self.state.shaders = registry;
+        self
     }
 
     /// Set the tolerance used when converting rounded rectangles to paths.
@@ -891,6 +901,13 @@ impl SkPictureRecorderSink {
             font_cache,
             state: StreamState::new(),
         }
+    }
+
+    /// Use a shared registry to resolve shader brushes.
+    #[must_use]
+    pub fn with_shader_registry(mut self, registry: SkiaShaderRegistry) -> Self {
+        self.state.shaders = registry;
+        self
     }
 
     /// Set the tolerance used when converting rounded rectangles to paths.

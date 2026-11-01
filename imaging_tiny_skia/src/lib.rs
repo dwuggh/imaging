@@ -59,6 +59,8 @@ type Result<T, E = Error> = core::result::Result<T, E>;
 /// Errors that can occur when rendering via tiny-skia.
 #[derive(Debug)]
 pub enum Error {
+    /// Shader brushes are not supported by this backend.
+    UnsupportedShaderBrush,
     /// The scene is invalid (unbalanced stacks).
     InvalidScene(ValidateError),
     /// The caller-provided buffer format is not supported by this renderer.
@@ -2418,6 +2420,10 @@ impl<'renderer, 'target> TinySkiaRender<'renderer, 'target> {
     }
 
     fn brush_to_owned(&mut self, brush: imaging::BrushRef<'_>) -> Option<peniko::Brush> {
+        if matches!(brush, imaging::BrushRef::Shader(_)) {
+            self.error = Some(Error::UnsupportedShaderBrush);
+            return None;
+        }
         let Some(brush) = brush.as_raster() else {
             self.error = Some(Error::UnsupportedExternalImage);
             return None;
@@ -2839,6 +2845,13 @@ impl PaintSink for TinySkiaRender<'_, '_> {
         if group
             .mask
             .as_ref()
+            .is_some_and(|mask| mask.mask.scene.has_shader_brushes())
+        {
+            self.error = Some(Error::UnsupportedShaderBrush);
+        }
+        if group
+            .mask
+            .as_ref()
             .is_some_and(|mask| mask.mask.scene.has_external_images())
         {
             self.error = Some(Error::UnsupportedExternalImage);
@@ -3084,6 +3097,10 @@ impl PaintSink for TinySkiaRender<'_, '_> {
         if self.discarding_group() {
             return;
         }
+        if matches!(draw.brush, imaging::BrushRef::Shader(_)) {
+            self.error = Some(Error::UnsupportedShaderBrush);
+            return;
+        }
         if draw.brush.as_raster().is_none() {
             self.error = Some(Error::UnsupportedExternalImage);
             return;
@@ -3254,6 +3271,9 @@ impl ImageRenderer for TinySkiaRenderer {
 
 fn map_image_renderer_error(error: Error) -> ImageRendererError {
     match error {
+        Error::UnsupportedShaderBrush => ImageRendererError::Unsupported(
+            imaging::render::RenderUnsupportedError::UnsupportedShaderBrush,
+        ),
         Error::InvalidScene(error) => {
             ImageRendererError::Content(RenderContentError::InvalidScene(error))
         }

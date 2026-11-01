@@ -146,6 +146,10 @@ impl<'a> VelloSceneSink<'a> {
         brush: imaging::BrushRef<'_>,
         composite: Composite,
     ) -> Option<Brush> {
+        if matches!(brush, imaging::BrushRef::Shader(_)) {
+            self.set_error_once(Error::UnsupportedShaderBrush);
+            return None;
+        }
         if let imaging::BrushRef::Image(imaging::ImageBrushRef {
             image: imaging::ImageRef::External(handle),
             mut sampler,
@@ -167,7 +171,7 @@ impl<'a> VelloSceneSink<'a> {
         }
         let brush = brush
             .as_raster()
-            .expect("external images were resolved above");
+            .expect("external images and shaders were handled above");
         let brush = brush.to_owned().multiply_alpha(composite.alpha);
         match brush {
             Brush::Solid(_) | Brush::Gradient(_) | Brush::Image(_) => Some(brush),

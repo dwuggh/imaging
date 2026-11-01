@@ -1112,11 +1112,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "imaging_shader_ext"
+version = "0.0.1"
+dependencies = [
+ "imaging",
+]
+
+[[package]]
 name = "imaging_skia"
 version = "0.0.1"
 dependencies = [
  "ash",
  "imaging",
+ "imaging_shader_ext",
  "imaging_wgpu",
  "kurbo",
  "oaty",

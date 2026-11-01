@@ -1,7 +1,7 @@
 // Copyright 2026 the Imaging Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::{Image, ImageRef};
+use crate::{Image, ImageRef, ShaderBrush};
 use peniko::color::{AlphaColor, ColorSpace, DynamicColor, OpaqueColor, Srgb};
 use peniko::{Gradient, ImageSampler};
 
@@ -115,6 +115,8 @@ pub enum Brush {
     Gradient(Gradient),
     /// Raster or external image.
     Image(ImageBrush),
+    /// Shader instance bound in a separate registry.
+    Shader(ShaderBrush),
 }
 
 /// Borrowed paint accepted by streaming drawing commands.
@@ -126,6 +128,8 @@ pub enum BrushRef<'a> {
     Gradient(&'a Gradient),
     /// Raster or external image.
     Image(ImageBrushRef<'a>),
+    /// Shader instance bound in a separate registry.
+    Shader(&'a ShaderBrush),
 }
 
 impl Default for Brush {
@@ -141,6 +145,7 @@ impl Brush {
             Self::Solid(color) => BrushRef::Solid(*color),
             Self::Gradient(gradient) => BrushRef::Gradient(gradient),
             Self::Image(image) => BrushRef::Image(image.as_ref()),
+            Self::Shader(shader) => BrushRef::Shader(shader),
         }
     }
 }
@@ -152,17 +157,19 @@ impl<'a> BrushRef<'a> {
             Self::Solid(color) => Brush::Solid(color),
             Self::Gradient(gradient) => Brush::Gradient(gradient.clone()),
             Self::Image(image) => Brush::Image(image.to_owned()),
+            Self::Shader(shader) => Brush::Shader(shader.clone()),
         }
     }
-    /// Borrow Peniko paint when it contains raster pixels or no image.
+    /// Borrow a solid, gradient, or raster-image Peniko brush.
     ///
-    /// External images require a renderer resource binding and return `None`.
+    /// External images and shader brushes require resource bindings and return `None`.
     #[must_use]
     pub fn as_raster(self) -> Option<peniko::BrushRef<'a>> {
         Some(match self {
             Self::Solid(color) => peniko::BrushRef::Solid(color),
             Self::Gradient(gradient) => peniko::BrushRef::Gradient(gradient),
             Self::Image(image) => peniko::BrushRef::Image(image.as_raster()?),
+            Self::Shader(_) => return None,
         })
     }
 }
@@ -185,6 +192,16 @@ impl From<Gradient> for Brush {
 impl From<ImageBrush> for Brush {
     fn from(image: ImageBrush) -> Self {
         Self::Image(image)
+    }
+}
+impl From<ShaderBrush> for Brush {
+    fn from(shader: ShaderBrush) -> Self {
+        Self::Shader(shader)
+    }
+}
+impl<'a> From<&'a ShaderBrush> for BrushRef<'a> {
+    fn from(shader: &'a ShaderBrush) -> Self {
+        Self::Shader(shader)
     }
 }
 impl<'a> From<ImageBrushRef<'a>> for BrushRef<'a> {
@@ -280,6 +297,35 @@ mod tests {
     };
     use kurbo::Affine;
     use peniko::ImageAlphaType;
+
+    #[test]
+    fn shader_identity_survives_recording_and_replay() {
+        let handle = crate::ShaderHandle::new();
+        assert_ne!(handle, crate::ShaderHandle::new());
+        let brush = ShaderBrush {
+            shader: handle.clone(),
+        };
+        let mut scene = Scene::new();
+        Painter::new(&mut scene).fill_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), &brush);
+        drop(brush);
+        assert!(scene.has_shader_brushes());
+        scene.validate().unwrap();
+        let mut copy = Scene::new();
+        record::replay(&scene.clone(), &mut copy);
+        assert_eq!(scene, copy);
+        let record::Command::Draw(id) = copy.commands()[0] else {
+            panic!("expected draw");
+        };
+        let record::Draw::Fill {
+            brush: Brush::Shader(brush),
+            ..
+        } = copy.draw_op(id)
+        else {
+            panic!("expected shader fill");
+        };
+        assert_eq!(brush.shader, handle);
+        assert!(BrushRef::from(brush).as_raster().is_none());
+    }
 
     #[test]
     fn external_image_identity_and_sampling_survive_recording_and_replay() {

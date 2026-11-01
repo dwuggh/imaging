@@ -67,6 +67,8 @@ pub enum RenderContentError {
     InvalidScene(record::ValidateError),
     /// An external image has no binding on the active renderer.
     UnboundImage(crate::ExternalImage),
+    /// A shader brush has no binding in the active shader registry.
+    UnboundShader(crate::ShaderHandle),
     /// The backend could not decode or use the supplied font data.
     InvalidFontData,
     /// A glyph identifier could not be represented by the backend.
@@ -80,6 +82,9 @@ impl core::fmt::Display for RenderContentError {
             Self::UnboundImage(image) => {
                 write!(f, "external image has no renderer binding: {image:?}")
             }
+            Self::UnboundShader(shader) => {
+                write!(f, "shader has no registry binding: {shader:?}")
+            }
             Self::InvalidFontData => f.write_str("backend could not decode font data"),
             Self::InvalidGlyphId => f.write_str("backend could not represent a glyph identifier"),
         }
@@ -90,7 +95,10 @@ impl core::error::Error for RenderContentError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::InvalidScene(error) => Some(error),
-            Self::InvalidFontData | Self::InvalidGlyphId | Self::UnboundImage(_) => None,
+            Self::InvalidFontData
+            | Self::InvalidGlyphId
+            | Self::UnboundImage(_)
+            | Self::UnboundShader(_) => None,
         }
     }
 }
@@ -98,6 +106,8 @@ impl core::error::Error for RenderContentError {
 /// Shared unsupported-feature failures surfaced by renderer traits.
 #[derive(Debug)]
 pub enum RenderUnsupportedError {
+    /// The backend cannot render shader brushes.
+    UnsupportedShaderBrush,
     /// An image brush was encountered on a backend that cannot render it.
     ImageBrush,
     /// The backend cannot sample renderer-bound external images.
@@ -117,6 +127,7 @@ pub enum RenderUnsupportedError {
 impl core::fmt::Display for RenderUnsupportedError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::UnsupportedShaderBrush => f.write_str("backend does not support shader brushes"),
             Self::ExternalImage => f.write_str("backend does not support external images"),
             Self::ImageBrush => f.write_str("backend does not support image brushes"),
             Self::Filter => f.write_str("backend does not support this filter"),

@@ -93,6 +93,8 @@ use vello_cpu::{Glyph as VelloGlyph, Pixmap, PixmapMut, RenderContext, RenderSet
 /// Errors that can occur when rendering via Vello CPU.
 #[derive(Debug)]
 pub enum Error {
+    /// Shader brushes are not supported by this backend.
+    UnsupportedShaderBrush,
     /// The scene is invalid (unbalanced stacks).
     InvalidScene(ValidateError),
     /// This renderer cannot sample externally bound images.
@@ -307,6 +309,10 @@ impl VelloCpuRenderer {
         brush: imaging::BrushRef<'_>,
         composite: Composite,
     ) -> Option<vello_cpu::PaintType> {
+        if matches!(brush, imaging::BrushRef::Shader(_)) {
+            self.set_error_once(Error::UnsupportedShaderBrush);
+            return None;
+        }
         let Some(brush) = brush.as_raster() else {
             self.set_error_once(Error::UnsupportedExternalImage);
             return None;
@@ -535,6 +541,9 @@ impl ImageRenderer for VelloCpuRenderer {
 
 fn map_image_renderer_error(error: Error) -> ImageRendererError {
     match error {
+        Error::UnsupportedShaderBrush => {
+            ImageRendererError::Unsupported(RenderUnsupportedError::UnsupportedShaderBrush)
+        }
         Error::InvalidScene(error) => {
             ImageRendererError::Content(RenderContentError::InvalidScene(error))
         }

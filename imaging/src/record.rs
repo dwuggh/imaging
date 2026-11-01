@@ -441,6 +441,27 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Whether this recording or a referenced mask uses a shader brush.
+    #[must_use]
+    pub fn has_shader_brushes(&self) -> bool {
+        self.commands.iter().any(|command| match *command {
+            Command::Draw(id) => {
+                let brush = match self.draw_op(id) {
+                    Draw::Fill { brush, .. } | Draw::Stroke { brush, .. } => brush,
+                    Draw::GlyphRun(run) => &run.brush,
+                    Draw::BlurredRoundedRect(_) => return false,
+                };
+                matches!(brush, Brush::Shader(_))
+            }
+            Command::PushGroup(id) => self
+                .group(id)
+                .mask
+                .as_ref()
+                .is_some_and(|mask| self.mask(mask.mask).scene.has_shader_brushes()),
+            _ => false,
+        })
+    }
+
     /// Whether this recording or a referenced mask samples an external image.
     ///
     /// External pixels can change without changing scene equality. Renderers must not reuse
