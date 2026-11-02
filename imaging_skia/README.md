@@ -51,6 +51,49 @@ cargo run -p imaging_skia --example sksl -- /tmp/imaging-sksl.png
 
 The output path is optional and defaults to `sksl.png`.
 
+# `SkSL` Group Filters
+
+Create programs with `ShaderDesc::kind` set to `ShaderKind::ColorFilter` or
+`ShaderKind::ImageFilter`, then use their handles in `GroupRef::with_filters`:
+
+```rust,ignore
+let filters = [Filter::Shader(grade), Filter::Shader(warp), Filter::blur(0.5)];
+painter.with_group(GroupRef::new().with_filters(&filters), |p| {
+    // Draw the group's content here.
+});
+```
+
+Filters consume the previous result in slice order, starting with the group's
+content. Color filters transform premultiplied colors. Image filters receive
+pixels through the shader child named by `ImageFilterBinding::input`, with a
+finite, nonnegative `sample_radius` bounding all sampling offsets. Set
+`GroupRef::filter_transform` to position the image filter's coordinate system;
+translation is significant. Image-filter transforms must be invertible and
+representable by Skia. Color filters do not depend on coordinates.
+
+The current safe bindings support one dynamic image-filter input and non-array
+scalar/vector/matrix uniforms. Extra image-filter children and uniform arrays
+are rejected. Output is not restricted to input bounds. Runtime color filters
+and brush shaders retain array support and accept shader/color-filter children
+where Skia permits them. Filter handles used as brushes, or brush handles used
+as filters, produce content errors rather than being silently substituted.
+
+Native effects can also be registered with `register_shader`,
+`register_color_filter`, and `register_image_filter`. All three return the same
+copyable, non-owning handle. Keep instances registered until scene replay;
+recorded native pictures retain their resources.
+
+The comparison example shows original artwork, duotone grading, wave distortion
+with chromatic separation, and a composed chain with a second immutable warp
+instance and a drop shadow:
+
+```sh
+cargo run -p imaging_skia --example sksl_filters -- /tmp/sksl-filters.png
+```
+
+The output path defaults to `sksl-filters.png`. The example embeds the repository's
+font and needs no window, GPU, or external assets.
+
 # Render A Recorded Scene
 
 Record commands into [`imaging::record::Scene`], then hand the scene to [`SkiaCpuRenderer`].

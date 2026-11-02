@@ -166,7 +166,7 @@ pub(crate) fn filter_is_valid(filter: &Filter, transform: Affine) -> bool {
             && Vec2::new(b * sx, d * sy).hypot().is_finite()
     };
     match *filter {
-        Filter::Flood { .. } => true,
+        Filter::Flood { .. } | Filter::Shader(_) => true,
         Filter::Blur {
             std_deviation_x,
             std_deviation_y,

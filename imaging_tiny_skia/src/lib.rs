@@ -2845,6 +2845,13 @@ impl PaintSink for TinySkiaRender<'_, '_> {
         if group
             .mask
             .as_ref()
+            .is_some_and(|mask| mask.mask.scene.has_shader_filters())
+        {
+            self.error = Some(Error::UnsupportedFilter);
+        }
+        if group
+            .mask
+            .as_ref()
             .is_some_and(|mask| mask.mask.scene.has_shader_brushes())
         {
             self.error = Some(Error::UnsupportedShaderBrush);
@@ -2894,6 +2901,7 @@ impl PaintSink for TinySkiaRender<'_, '_> {
                     } => supports_blur(std_deviation_x, std_deviation_y) && supports_offset(dx, dy),
                     Filter::Offset { dx, dy } => supports_offset(dx, dy),
                     Filter::Flood { .. } => true,
+                    Filter::Shader(_) => false,
                 };
                 supported.then_some(filter)
             })
@@ -5378,6 +5386,8 @@ fn drop_shadow_pixmap_local(
 
 fn filter_output_bounds(bounds: Option<Rect>, filter: &Filter, pixmap: &Pixmap) -> Option<Rect> {
     match *filter {
+        // Shader filters are rejected when the group is pushed.
+        Filter::Shader(_) => None,
         Filter::Flood { .. } => Some(Rect::from_origin_size(
             Point::ZERO,
             Size::new(f64::from(pixmap.width()), f64::from(pixmap.height())),
@@ -5411,6 +5421,7 @@ fn filter_output_bounds(bounds: Option<Rect>, filter: &Filter, pixmap: &Pixmap) 
 
 fn filter_pixmap(pixmap: &Pixmap, bounds: Option<Rect>, filter: &Filter) -> Option<Pixmap> {
     match *filter {
+        Filter::Shader(_) => None,
         Filter::Flood { color } => {
             let mut flooded = Pixmap::new(pixmap.width(), pixmap.height())?;
             flooded.fill(to_color(color));

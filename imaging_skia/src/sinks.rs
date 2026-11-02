@@ -128,10 +128,14 @@ fn push_group_impl(canvas: &sk::Canvas, state: &mut StreamState, group: GroupRef
         state.set_error_once(Error::UnsupportedExternalImage);
     }
     let (filter, filter_transform) =
-        build_transformed_filter_chain(group.filters, group.filter_transform);
-    if !group.filters.is_empty() && filter.is_none() {
-        state.set_error_once(Error::UnsupportedFilter);
-    }
+        match build_transformed_filter_chain(group.filters, group.filter_transform, &state.shaders)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                state.set_error_once(error);
+                return 0;
+            }
+        };
 
     let mut paint = sk::Paint::default();
     paint.set_blend_mode(map_blend_mode(&group.composite.blend));
@@ -154,31 +158,44 @@ fn push_group_impl(canvas: &sk::Canvas, state: &mut StreamState, group: GroupRef
 fn build_transformed_filter_chain(
     filters: &[imaging::Filter],
     transform: Affine,
-) -> (Option<sk::ImageFilter>, Affine) {
-    // Prefer device-space parameters, including for singular transforms that Skia's CTM
-    // would otherwise treat as invisible. Preserve native affine kernels when needed.
-    if let Some(filters) = filters
-        .iter()
-        .map(|filter| filter.in_device_space(transform))
-        .collect::<Option<Vec<_>>>()
-    {
-        (build_filter_chain(&filters), Affine::IDENTITY)
-    } else if !transform.is_finite() || transform.determinant() == 0.0 {
-        (None, Affine::IDENTITY)
-    } else {
-        // Filter parameters use only the linear part. Check Skia's matrix range here,
-        // at the native boundary, rather than constraining the shared geometry model.
-        let transform = transform.with_translation(kurbo::Vec2::ZERO);
-        if !transform
-            .as_coeffs()
-            .into_iter()
-            .map(f64_to_f32)
-            .all(f32::is_finite)
-        {
-            return (None, Affine::IDENTITY);
+    shaders: &SkiaShaderRegistry,
+) -> Result<(Option<sk::ImageFilter>, Affine), Error> {
+    // Resolve every handle before lowering, including ones after a spatial filter.
+    let mut spatial = false;
+    for filter in filters {
+        if let imaging::Filter::Shader(handle) = *filter {
+            spatial |= shaders.filter_is_spatial(handle)?;
         }
-        (build_filter_chain(filters), transform)
     }
+    if !spatial {
+        // Color filters are coordinate-independent. Keep device-space lowering for
+        // built-ins, including singular transforms supported by that path.
+        let lowered = filters
+            .iter()
+            .map(|filter| match filter {
+                imaging::Filter::Shader(_) => Some(*filter),
+                _ => filter.in_device_space(transform),
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(filters) = lowered {
+            return Ok((build_filter_chain(&filters, shaders)?, Affine::IDENTITY));
+        }
+    }
+    if !transform.is_finite() || transform.determinant() == 0.0 {
+        return Err(Error::UnsupportedFilter);
+    }
+    // Runtime image filters observe positions, so translation must be preserved.
+    // Built-in kernels only depend on the linear part of the transform.
+    let transform = if spatial {
+        transform
+    } else {
+        transform.with_translation(kurbo::Vec2::ZERO)
+    };
+    let native = affine_to_matrix(transform);
+    if !native.is_finite() || native.invert().is_none() {
+        return Err(Error::UnsupportedFilter);
+    }
+    Ok((build_filter_chain(filters, shaders)?, transform))
 }
 
 fn apply_isolated_clip(canvas: &sk::Canvas, state: &mut StreamState, clip: ClipRef<'_>) {
@@ -413,12 +430,17 @@ fn draw_masked_group(
     paint.set_anti_alias(true);
     paint.set_blend_mode(map_blend_mode(&masked.composite.blend));
     paint.set_alpha_f(masked.composite.alpha.clamp(0.0, 1.0));
-    let (filter, filter_transform) =
-        build_transformed_filter_chain(&masked.filters, masked.filter_transform);
-    if !masked.filters.is_empty() && filter.is_none() {
-        state.set_error_once(Error::UnsupportedFilter);
-        return;
-    }
+    let (filter, filter_transform) = match build_transformed_filter_chain(
+        &masked.filters,
+        masked.filter_transform,
+        &state.shaders,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            state.set_error_once(error);
+            return;
+        }
+    };
 
     set_matrix(canvas, Affine::IDENTITY);
     let bounds = canvas.local_clip_bounds();

@@ -36,6 +36,49 @@
 //!
 //! The output path is optional and defaults to `sksl.png`.
 //!
+//! # `SkSL` Group Filters
+//!
+//! Create programs with `ShaderDesc::kind` set to `ShaderKind::ColorFilter` or
+//! `ShaderKind::ImageFilter`, then use their handles in `GroupRef::with_filters`:
+//!
+//! ```rust,ignore
+//! let filters = [Filter::Shader(grade), Filter::Shader(warp), Filter::blur(0.5)];
+//! painter.with_group(GroupRef::new().with_filters(&filters), |p| {
+//!     // Draw the group's content here.
+//! });
+//! ```
+//!
+//! Filters consume the previous result in slice order, starting with the group's
+//! content. Color filters transform premultiplied colors. Image filters receive
+//! pixels through the shader child named by `ImageFilterBinding::input`, with a
+//! finite, nonnegative `sample_radius` bounding all sampling offsets. Set
+//! `GroupRef::filter_transform` to position the image filter's coordinate system;
+//! translation is significant. Image-filter transforms must be invertible and
+//! representable by Skia. Color filters do not depend on coordinates.
+//!
+//! The current safe bindings support one dynamic image-filter input and non-array
+//! scalar/vector/matrix uniforms. Extra image-filter children and uniform arrays
+//! are rejected. Output is not restricted to input bounds. Runtime color filters
+//! and brush shaders retain array support and accept shader/color-filter children
+//! where Skia permits them. Filter handles used as brushes, or brush handles used
+//! as filters, produce content errors rather than being silently substituted.
+//!
+//! Native effects can also be registered with `register_shader`,
+//! `register_color_filter`, and `register_image_filter`. All three return the same
+//! copyable, non-owning handle. Keep instances registered until scene replay;
+//! recorded native pictures retain their resources.
+//!
+//! The comparison example shows original artwork, duotone grading, wave distortion
+//! with chromatic separation, and a composed chain with a second immutable warp
+//! instance and a drop shadow:
+//!
+//! ```sh
+//! cargo run -p imaging_skia --example sksl_filters -- /tmp/sksl-filters.png
+//! ```
+//!
+//! The output path defaults to `sksl-filters.png`. The example embeds the repository's
+//! font and needs no window, GPU, or external assets.
+//!
 //! # Render A Recorded Scene
 //!
 //! Record commands into [`imaging::record::Scene`], then hand the scene to [`SkiaCpuRenderer`].
@@ -229,8 +272,15 @@ pub use wgpu;
 /// Errors that can occur when rendering via Skia.
 #[derive(Debug)]
 pub enum Error {
-    /// A shader brush is not bound in this renderer's registry.
+    /// A shader brush or filter is not bound in this renderer's registry.
     UnboundShader(imaging::ShaderHandle),
+    /// A bound instance cannot be used in the requested role.
+    InvalidShaderUsage {
+        /// Instance used in the wrong role.
+        shader: imaging::ShaderHandle,
+        /// Expected usage.
+        usage: &'static str,
+    },
     /// The scene is invalid (unbalanced stacks).
     InvalidScene(ValidateError),
     /// No supported Ganesh backend was available for the active platform or `wgpu` backend.
@@ -1190,6 +1240,9 @@ impl ImageRenderer for SkiaRenderer {
 
 fn map_image_renderer_error(error: Error) -> ImageRendererError {
     match error {
+        Error::InvalidShaderUsage { shader, usage } => {
+            ImageRendererError::Content(RenderContentError::InvalidShaderUsage { shader, usage })
+        }
         Error::UnboundShader(handle) => {
             ImageRendererError::Content(RenderContentError::UnboundShader(handle))
         }
@@ -1257,6 +1310,9 @@ fn map_readback_image_error(error: ReadbackError) -> ImageRendererError {
 #[cfg(feature = "gpu")]
 fn map_texture_renderer_error(error: Error) -> TextureRendererError {
     match error {
+        Error::InvalidShaderUsage { shader, usage } => {
+            TextureRendererError::Content(RenderContentError::InvalidShaderUsage { shader, usage })
+        }
         Error::UnboundShader(handle) => {
             TextureRendererError::Content(RenderContentError::UnboundShader(handle))
         }
@@ -1827,9 +1883,7 @@ fn brush_to_paint(
     shaders: &SkiaShaderRegistry,
 ) -> Result<sk::Paint, Error> {
     if let imaging::BrushRef::Shader(brush) = brush {
-        let shader = shaders
-            .resolve(&brush.shader)
-            .ok_or_else(|| Error::UnboundShader(brush.shader.clone()))?;
+        let shader = shaders.resolve(brush.shader)?;
         let mut paint = sk::Paint::default();
         paint.set_anti_alias(true);
         paint.set_shader(shader.with_local_matrix(&affine_to_matrix(paint_xf)));
@@ -2079,16 +2133,20 @@ fn map_blend_mode(mode: &peniko::BlendMode) -> sk::BlendMode {
     }
 }
 
-fn build_filter_chain(filters: &[Filter]) -> Option<sk::ImageFilter> {
+fn build_filter_chain(
+    filters: &[Filter],
+    shaders: &SkiaShaderRegistry,
+) -> Result<Option<sk::ImageFilter>, Error> {
     use sk::image_filters;
 
     let mut current: Option<sk::ImageFilter> = None;
     for f in filters {
         current = Some(match *f {
+            Filter::Shader(handle) => shaders.apply_filter(handle, current)?,
             Filter::Flood { color } => {
                 let shader = sk::shaders::color(color_to_sk_color(color));
                 // Leaf filter: ignores any existing input chain.
-                image_filters::shader(shader, None)?
+                image_filters::shader(shader, None).ok_or(Error::UnsupportedFilter)?
             }
             Filter::Blur {
                 std_deviation_x,
@@ -2096,9 +2154,9 @@ fn build_filter_chain(filters: &[Filter]) -> Option<sk::ImageFilter> {
             } => {
                 let sigma = (f64_to_f32(std_deviation_x), f64_to_f32(std_deviation_y));
                 if !sigma.0.is_finite() || !sigma.1.is_finite() {
-                    return None;
+                    return Err(Error::UnsupportedFilter);
                 }
-                image_filters::blur(sigma, None, current, None)?
+                image_filters::blur(sigma, None, current, None).ok_or(Error::UnsupportedFilter)?
             }
             Filter::DropShadow {
                 dx,
@@ -2113,7 +2171,7 @@ fn build_filter_chain(filters: &[Filter]) -> Option<sk::ImageFilter> {
                     .into_iter()
                     .all(f32::is_finite)
                 {
-                    return None;
+                    return Err(Error::UnsupportedFilter);
                 }
                 image_filters::drop_shadow(
                     offset,
@@ -2122,18 +2180,19 @@ fn build_filter_chain(filters: &[Filter]) -> Option<sk::ImageFilter> {
                     None,
                     current,
                     None,
-                )?
+                )
+                .ok_or(Error::UnsupportedFilter)?
             }
             Filter::Offset { dx, dy } => {
                 let offset = (f64_to_f32(dx), f64_to_f32(dy));
                 if !offset.0.is_finite() || !offset.1.is_finite() {
-                    return None;
+                    return Err(Error::UnsupportedFilter);
                 }
-                image_filters::offset(offset, current, None)?
+                image_filters::offset(offset, current, None).ok_or(Error::UnsupportedFilter)?
             }
         });
     }
-    current
+    Ok(current)
 }
 
 #[cfg(test)]

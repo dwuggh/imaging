@@ -4,7 +4,8 @@
 //! Shader creation interfaces for `imaging` backends.
 //!
 //! Registries own compiled programs and immutable bindings. Draws use
-//! [`imaging::ShaderBrush`] to reference the resulting [`ShaderHandle`].
+//! [`imaging::ShaderBrush`] or [`imaging::Filter::Shader`] to reference the resulting
+//! [`ShaderHandle`].
 
 #![no_std]
 
@@ -18,8 +19,21 @@ pub use imaging::{ShaderBrush, ShaderHandle};
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ShaderSource<'a> {
-    /// Skia runtime shader source with a `half4 main(float2)` entry point.
+    /// Skia runtime source. The entry point depends on [`ShaderDesc::kind`].
     SkSl(&'a str),
+}
+
+/// Role of a compiled program and its bound instances.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShaderKind {
+    /// A brush color source, with a `half4 main(float2)` entry point in `SkSL`.
+    #[default]
+    Shader,
+    /// A color transformation, with a `half4 main(half4)` entry point in `SkSL`.
+    ColorFilter,
+    /// An image transformation using a shader entry point and a dynamic shader child.
+    ImageFilter,
 }
 
 /// Description of a shader program to compile.
@@ -29,10 +43,12 @@ pub struct ShaderDesc<'a> {
     pub label: Option<&'a str>,
     /// Program source; uniform declarations are reflected after compilation.
     pub source: ShaderSource<'a>,
+    /// How instances of this program will be used.
+    pub kind: ShaderKind,
 }
 
 /// Opaque identity of compiled code owned by a registry.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ShaderProgram(ShaderHandle);
 
 impl ShaderProgram {
@@ -88,10 +104,21 @@ pub struct UniformDesc {
 /// Bindings required by a compiled shader program.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShaderLayout {
+    /// Role of this program.
+    pub kind: ShaderKind,
     /// Required numeric uniforms.
     pub uniforms: Vec<UniformDesc>,
-    /// Required child shader names, in declaration order.
-    pub children: Vec<String>,
+    /// Required children and their roles, in declaration order.
+    pub children: Vec<ShaderChildDesc>,
+}
+
+/// A reflected child effect declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaderChildDesc {
+    /// Source-level name.
+    pub name: String,
+    /// Required instance kind; image filters cannot be used as children.
+    pub kind: ShaderKind,
 }
 
 /// Borrowed numeric values, copied when a shader is bound.
@@ -105,14 +132,27 @@ pub enum UniformValue<'a> {
 
 /// Values used to create an immutable shader instance.
 ///
-/// Supply every reflected uniform and child exactly once. Child shaders must be
-/// bound in the same registry. Numeric slices are never retained by reference.
+/// Supply every reflected uniform and child exactly once, except the automatic
+/// image-filter input. Children must be bound in the same registry. Numeric slices
+/// are never retained by reference.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShaderBindings<'a> {
     /// Uniform names and values.
     pub uniforms: &'a [(&'a str, UniformValue<'a>)],
-    /// Child shader names and handles.
-    pub children: &'a [(&'a str, &'a ShaderHandle)],
+    /// Child effect names and handles.
+    pub children: &'a [(&'a str, ShaderHandle)],
+    /// Dynamic input configuration, required only for image-filter instances.
+    pub image_filter: Option<ImageFilterBinding<'a>>,
+}
+
+/// Input supplied automatically when an image filter is applied to a group.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageFilterBinding<'a> {
+    /// Name of the shader child receiving the preceding filter result or group content.
+    pub input: &'a str,
+    /// Maximum absolute sampling offset in either axis, in filter-local coordinates.
+    /// Must be finite and nonnegative; the caller must bound all input samples by it.
+    pub sample_radius: f32,
 }
 
 /// Compilation or binding failure.
@@ -124,7 +164,7 @@ pub enum ShaderError {
     UnsupportedSource,
     /// The program is absent from this registry.
     UnboundProgram,
-    /// A child shader is absent from this registry.
+    /// A child effect is absent from this registry.
     UnboundShader(ShaderHandle),
     /// Invalid uniform name, type, count, or duplicate/missing binding.
     InvalidUniform {
@@ -140,7 +180,9 @@ pub enum ShaderError {
         /// Explanation of the failure.
         reason: &'static str,
     },
-    /// The native backend could not instantiate the shader.
+    /// Missing, unexpected, or invalid image-filter input configuration.
+    InvalidImageFilter(&'static str),
+    /// The native backend could not instantiate the shader or filter.
     CreateShader,
 }
 
@@ -153,7 +195,8 @@ impl fmt::Display for ShaderError {
             Self::UnboundShader(handle) => write!(f, "child shader is not bound: {handle:?}"),
             Self::InvalidUniform { name, reason } => write!(f, "uniform {name:?}: {reason}"),
             Self::InvalidChild { name, reason } => write!(f, "child {name:?}: {reason}"),
-            Self::CreateShader => f.write_str("failed to create native shader"),
+            Self::InvalidImageFilter(reason) => write!(f, "invalid image filter: {reason}"),
+            Self::CreateShader => f.write_str("failed to create native shader or filter"),
         }
     }
 }
@@ -166,7 +209,7 @@ pub trait ShaderFactory {
     fn create_program(&self, desc: ShaderDesc<'_>) -> Result<ShaderProgram, ShaderError>;
     /// Inspect the declarations required by a program in this registry.
     fn layout(&self, program: &ShaderProgram) -> Result<ShaderLayout, ShaderError>;
-    /// Copy bindings and create a new immutable shader instance.
+    /// Copy bindings and create a new immutable shader or filter instance.
     fn bind_shader(
         &self,
         program: &ShaderProgram,

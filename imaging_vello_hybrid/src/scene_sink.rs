@@ -503,6 +503,7 @@ impl<'a> VelloHybridSceneSink<'a> {
 )]
 fn filter_to_vello(filter: imaging::Filter) -> Result<VelloFilter, Error> {
     let primitive = match filter {
+        imaging::Filter::Shader(_) => return Err(Error::UnsupportedFilter),
         imaging::Filter::Flood { color } => FilterPrimitive::Flood { color },
         imaging::Filter::Blur {
             std_deviation_x,

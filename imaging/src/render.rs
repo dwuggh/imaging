@@ -67,8 +67,15 @@ pub enum RenderContentError {
     InvalidScene(record::ValidateError),
     /// An external image has no binding on the active renderer.
     UnboundImage(crate::ExternalImage),
-    /// A shader brush has no binding in the active shader registry.
+    /// A shader brush or filter has no binding in the active shader registry.
     UnboundShader(crate::ShaderHandle),
+    /// A bound shader instance cannot be used in the requested role.
+    InvalidShaderUsage {
+        /// Instance that was used in the wrong role.
+        shader: crate::ShaderHandle,
+        /// Expected role, such as a brush or filter.
+        usage: &'static str,
+    },
     /// The backend could not decode or use the supplied font data.
     InvalidFontData,
     /// A glyph identifier could not be represented by the backend.
@@ -85,6 +92,9 @@ impl core::fmt::Display for RenderContentError {
             Self::UnboundShader(shader) => {
                 write!(f, "shader has no registry binding: {shader:?}")
             }
+            Self::InvalidShaderUsage { shader, usage } => {
+                write!(f, "shader {shader:?} cannot be used as {usage}")
+            }
             Self::InvalidFontData => f.write_str("backend could not decode font data"),
             Self::InvalidGlyphId => f.write_str("backend could not represent a glyph identifier"),
         }
@@ -98,7 +108,8 @@ impl core::error::Error for RenderContentError {
             Self::InvalidFontData
             | Self::InvalidGlyphId
             | Self::UnboundImage(_)
-            | Self::UnboundShader(_) => None,
+            | Self::UnboundShader(_)
+            | Self::InvalidShaderUsage { .. } => None,
         }
     }
 }

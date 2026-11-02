@@ -610,6 +610,7 @@ fn unpremultiply_channel(channel: u8, alpha: u8) -> u8 {
 )]
 fn filter_to_vello(filter: Filter) -> Result<VelloFilter, Error> {
     let primitive = match filter {
+        Filter::Shader(_) => return Err(Error::UnsupportedFilter),
         Filter::Flood { color } => FilterPrimitive::Flood { color },
         Filter::Blur {
             std_deviation_x,

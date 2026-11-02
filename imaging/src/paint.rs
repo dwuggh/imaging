@@ -245,6 +245,8 @@ pub struct GroupRef<'a> {
     /// Maps filter user-space coordinates to the destination coordinate system.
     ///
     /// This transforms filter offsets and blur kernels, independently of content, clips, and masks.
+    /// Shader image filters use the complete transform, including translation, to map their
+    /// input coordinates. Shader color filters are coordinate-independent.
     /// Defaults to identity. Transformed replay prefixes this transform along with the content.
     pub filter_transform: Affine,
     /// Compositing parameters used when merging the group into its parent.

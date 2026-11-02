@@ -157,7 +157,7 @@ impl<'a> BrushRef<'a> {
             Self::Solid(color) => Brush::Solid(color),
             Self::Gradient(gradient) => Brush::Gradient(gradient.clone()),
             Self::Image(image) => Brush::Image(image.to_owned()),
-            Self::Shader(shader) => Brush::Shader(shader.clone()),
+            Self::Shader(shader) => Brush::Shader(*shader),
         }
     }
     /// Borrow a solid, gradient, or raster-image Peniko brush.
@@ -302,12 +302,9 @@ mod tests {
     fn shader_identity_survives_recording_and_replay() {
         let handle = crate::ShaderHandle::new();
         assert_ne!(handle, crate::ShaderHandle::new());
-        let brush = ShaderBrush {
-            shader: handle.clone(),
-        };
+        let brush = ShaderBrush { shader: handle };
         let mut scene = Scene::new();
         Painter::new(&mut scene).fill_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), &brush);
-        drop(brush);
         assert!(scene.has_shader_brushes());
         scene.validate().unwrap();
         let mut copy = Scene::new();

@@ -9,6 +9,11 @@ use kurbo::{Affine, Vec2};
 /// Offsets must be finite; standard deviations must be finite and nonnegative.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Filter {
+    /// Runtime color or image filter bound in the renderer's shader registry.
+    ///
+    /// The backend checks the instance kind. Image filters sample the previous filter
+    /// result (or group content) in coordinates defined by `GroupRef::filter_transform`.
+    Shader(crate::ShaderHandle),
     /// Fill the group output with a solid color (aka `feFlood`).
     ///
     /// This ignores the group's source content. It is still affected by the group's isolated clip.
@@ -86,6 +91,7 @@ impl Filter {
     /// Returns `None` if the transformed blur kernel is not axis-aligned. A rotated
     /// anisotropic blur or a sheared blur can require a non-axis-aligned kernel.
     /// Backends with native affine filter support may apply those kernels directly instead.
+    /// Opaque shader filters always return `None`; only the backend can transform them.
     ///
     /// Inputs must pass [`crate::record::Scene::validate`] or
     /// [`crate::validation::ValidatingSink`] before conversion.
@@ -106,6 +112,7 @@ impl Filter {
             Some((sx, sy))
         };
         Some(match self {
+            Self::Shader(_) => return None,
             Self::Flood { .. } => self,
             Self::Offset { dx, dy } => {
                 let (dx, dy) = offset(dx, dy);
@@ -145,6 +152,43 @@ impl Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shader_filter_identity_survives_replay_and_nested_masks() {
+        use crate::{GroupRef, MaskMode, MaskRef, Painter, ShaderBrush, ShaderHandle, record};
+
+        fn require_copy<T: Copy>(value: T) -> T {
+            value
+        }
+        let handle = require_copy(ShaderHandle::new());
+        let brush = require_copy(ShaderBrush { shader: handle });
+        let filter = require_copy(Filter::Shader(handle));
+        assert_eq!(brush.shader, handle);
+        assert_ne!(handle, ShaderHandle::new());
+        assert_eq!(filter.in_device_space(Affine::translate((3.0, 4.0))), None);
+
+        let mut mask = record::Scene::new();
+        Painter::new(&mut mask).with_group(GroupRef::new().with_filters(&[filter]), |p| {
+            p.fill_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), peniko::Color::WHITE);
+        });
+        assert!(mask.has_shader_filters());
+        assert!(!mask.has_shader_brushes());
+        let mut scene = record::Scene::new();
+        Painter::new(&mut scene).with_group(
+            GroupRef::new().with_mask(MaskRef::new(MaskMode::Alpha, &mask)),
+            |p| p.fill_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), peniko::Color::WHITE),
+        );
+        assert!(scene.has_shader_filters());
+        scene.validate().unwrap();
+        let mut copy = record::Scene::new();
+        record::replay(&scene, &mut copy);
+        assert_eq!(scene, copy);
+        assert!(copy.has_shader_filters());
+        let record::Command::PushGroup(id) = mask.commands()[0] else {
+            panic!("expected group")
+        };
+        assert_eq!(mask.group(id).filters, [Filter::Shader(handle)]);
+    }
 
     #[test]
     fn offsets_use_vectors_and_blurs_use_covariance() {

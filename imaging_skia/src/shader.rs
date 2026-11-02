@@ -3,8 +3,8 @@
 
 use imaging::ShaderHandle;
 use imaging_shader_ext::{
-    ShaderBindings, ShaderDesc, ShaderError, ShaderFactory, ShaderLayout, ShaderProgram,
-    ShaderSource, UniformDesc, UniformType, UniformValue,
+    ShaderBindings, ShaderChildDesc, ShaderDesc, ShaderError, ShaderFactory, ShaderKind,
+    ShaderLayout, ShaderProgram, ShaderSource, UniformDesc, UniformType, UniformValue,
 };
 use skia_safe::{
     self as sk,
@@ -16,7 +16,7 @@ use std::{
     rc::Rc,
 };
 
-/// Shared owner of compiled `SkSL` programs and immutable shader instances.
+/// Shared owner of compiled `SkSL` programs and immutable shader/filter instances.
 ///
 /// Clones share one registry. Attach it to a [`crate::SkiaConfig`],
 /// [`crate::SkCanvasSink`], or [`crate::SkPictureRecorderSink`] before rendering.
@@ -28,7 +28,14 @@ pub struct SkiaShaderRegistry(Rc<RefCell<Registry>>);
 #[derive(Debug, Default)]
 struct Registry {
     programs: HashMap<ShaderProgram, Program>,
-    shaders: HashMap<ShaderHandle, sk::Shader>,
+    shaders: HashMap<ShaderHandle, BoundEffect>,
+}
+
+#[derive(Debug)]
+enum BoundEffect {
+    Shader(sk::Shader),
+    ColorFilter(sk::ColorFilter),
+    ImageFilter(sk::ImageFilter),
 }
 
 #[derive(Debug)]
@@ -49,12 +56,27 @@ impl SkiaShaderRegistry {
     /// Any images or other resources referenced by the native shader must be usable
     /// on the target canvas. This does not transfer GPU resources between devices.
     pub fn register_shader(&self, shader: sk::Shader) -> ShaderHandle {
+        self.register(BoundEffect::Shader(shader))
+    }
+
+    /// Register an immutable native color filter for use in `Filter::Shader`.
+    pub fn register_color_filter(&self, filter: sk::ColorFilter) -> ShaderHandle {
+        self.register(BoundEffect::ColorFilter(filter))
+    }
+
+    /// Register an immutable native image filter for use in `Filter::Shader`.
+    /// Implicit source inputs receive the preceding filter result or group content.
+    pub fn register_image_filter(&self, filter: sk::ImageFilter) -> ShaderHandle {
+        self.register(BoundEffect::ImageFilter(filter))
+    }
+
+    fn register(&self, effect: BoundEffect) -> ShaderHandle {
         let handle = ShaderHandle::new();
-        self.0.borrow_mut().shaders.insert(handle.clone(), shader);
+        self.0.borrow_mut().shaders.insert(handle, effect);
         handle
     }
 
-    /// Remove a shader binding. Future semantic-scene replay using it fails.
+    /// Remove a shader or filter binding. Future semantic-scene replay using it fails.
     /// Existing native pictures and bound parent shaders remain valid.
     pub fn remove_shader(&self, handle: &ShaderHandle) -> bool {
         self.0.borrow_mut().shaders.remove(handle).is_some()
@@ -65,8 +87,52 @@ impl SkiaShaderRegistry {
         self.0.borrow_mut().programs.remove(program).is_some()
     }
 
-    pub(crate) fn resolve(&self, handle: &ShaderHandle) -> Option<sk::Shader> {
-        self.0.borrow().shaders.get(handle).cloned()
+    pub(crate) fn resolve(&self, handle: ShaderHandle) -> Result<sk::Shader, crate::Error> {
+        match self.0.borrow().shaders.get(&handle) {
+            Some(BoundEffect::Shader(shader)) => Ok(shader.clone()),
+            Some(_) => Err(crate::Error::InvalidShaderUsage {
+                shader: handle,
+                usage: "a brush",
+            }),
+            None => Err(crate::Error::UnboundShader(handle)),
+        }
+    }
+
+    pub(crate) fn filter_is_spatial(&self, handle: ShaderHandle) -> Result<bool, crate::Error> {
+        match self.0.borrow().shaders.get(&handle) {
+            Some(BoundEffect::ColorFilter(_)) => Ok(false),
+            Some(BoundEffect::ImageFilter(_)) => Ok(true),
+            Some(_) => Err(crate::Error::InvalidShaderUsage {
+                shader: handle,
+                usage: "a filter",
+            }),
+            None => Err(crate::Error::UnboundShader(handle)),
+        }
+    }
+
+    pub(crate) fn apply_filter(
+        &self,
+        handle: ShaderHandle,
+        input: Option<sk::ImageFilter>,
+    ) -> Result<sk::ImageFilter, crate::Error> {
+        let registry = self.0.borrow();
+        let result = match registry.shaders.get(&handle) {
+            Some(BoundEffect::ColorFilter(filter)) => {
+                sk::image_filters::color_filter(filter.clone(), input, None)
+            }
+            Some(BoundEffect::ImageFilter(filter)) => match input {
+                Some(input) => sk::image_filters::compose(filter.clone(), input),
+                None => Some(filter.clone()),
+            },
+            Some(_) => {
+                return Err(crate::Error::InvalidShaderUsage {
+                    shader: handle,
+                    usage: "a filter",
+                });
+            }
+            None => return Err(crate::Error::UnboundShader(handle)),
+        };
+        result.ok_or(crate::Error::UnsupportedFilter)
     }
 }
 
@@ -80,39 +146,73 @@ impl ShaderFactory for SkiaShaderRegistry {
             name: desc.label.unwrap_or_default(),
             ..sk::runtime_effect::Options::default()
         };
-        let effect = sk::RuntimeEffect::make_for_shader(source, Some(&options))
-            .map_err(ShaderError::Compilation)?;
+        let effect = match desc.kind {
+            ShaderKind::Shader | ShaderKind::ImageFilter => {
+                sk::RuntimeEffect::make_for_shader(source, Some(&options))
+            }
+            ShaderKind::ColorFilter => {
+                sk::RuntimeEffect::make_for_color_filter(source, Some(&options))
+            }
+            _ => return Err(ShaderError::UnsupportedSource),
+        }
+        .map_err(ShaderError::Compilation)?;
         let uniforms = effect
             .uniforms()
             .iter()
-            .map(|uniform| UniformDesc {
-                name: uniform.name().into(),
-                ty: uniform_type(uniform.ty()),
-                count: usize::try_from(uniform.count())
-                    .expect("Skia uniform counts are nonnegative"),
-                is_array: uniform.is_array(),
-                is_color: uniform.is_color(),
+            .map(|uniform| {
+                if desc.kind == ShaderKind::ImageFilter && uniform.is_array() {
+                    return Err(ShaderError::InvalidUniform {
+                        name: uniform.name().into(),
+                        reason: "image-filter uniform arrays are not supported by this backend",
+                    });
+                }
+                Ok(UniformDesc {
+                    name: uniform.name().into(),
+                    ty: uniform_type(uniform.ty()),
+                    count: usize::try_from(uniform.count())
+                        .expect("Skia uniform counts are nonnegative"),
+                    is_array: uniform.is_array(),
+                    is_color: uniform.is_color(),
+                })
             })
-            .collect();
-        let children = effect
+            .collect::<Result<_, _>>()?;
+        let children: Vec<ShaderChildDesc> = effect
             .children()
             .iter()
             .map(|child| {
-                if child.ty() != ChildType::Shader {
-                    return Err(ShaderError::InvalidChild {
-                        name: child.name().into(),
-                        reason: "only shader children are supported",
-                    });
-                }
-                Ok(child.name().into())
+                let kind = match child.ty() {
+                    ChildType::Shader => ShaderKind::Shader,
+                    ChildType::ColorFilter => ShaderKind::ColorFilter,
+                    ChildType::Blender => {
+                        return Err(ShaderError::InvalidChild {
+                            name: child.name().into(),
+                            reason: "blender children are not supported",
+                        });
+                    }
+                };
+                Ok(ShaderChildDesc {
+                    name: child.name().into(),
+                    kind,
+                })
             })
             .collect::<Result<_, _>>()?;
+        if desc.kind == ShaderKind::ImageFilter
+            && (children.len() != 1 || children[0].kind != ShaderKind::Shader)
+        {
+            return Err(ShaderError::InvalidImageFilter(
+                "exactly one shader child is required",
+            ));
+        }
         let program = ShaderProgram::new();
         self.0.borrow_mut().programs.insert(
-            program.clone(),
+            program,
             Program {
                 effect,
-                layout: ShaderLayout { uniforms, children },
+                layout: ShaderLayout {
+                    kind: desc.kind,
+                    uniforms,
+                    children,
+                },
             },
         );
         Ok(program)
@@ -187,6 +287,57 @@ impl ShaderFactory for SkiaShaderRegistry {
                 }
             }
 
+            if program.layout.kind == ShaderKind::ImageFilter {
+                let input = bindings
+                    .image_filter
+                    .ok_or(ShaderError::InvalidImageFilter(
+                        "missing dynamic input configuration",
+                    ))?;
+                if !input.sample_radius.is_finite() || input.sample_radius < 0.0 {
+                    return Err(ShaderError::InvalidImageFilter(
+                        "sample radius must be finite and nonnegative",
+                    ));
+                }
+                if input.input != program.layout.children[0].name {
+                    return Err(ShaderError::InvalidImageFilter(
+                        "input must name the declared shader child",
+                    ));
+                }
+                if !bindings.children.is_empty() {
+                    return Err(ShaderError::InvalidImageFilter(
+                        "the input child is supplied automatically",
+                    ));
+                }
+                let mut builder = sk::runtime_effect::RuntimeShaderBuilder::new(effect.clone());
+                // Names, numeric types, and lengths were checked above before calling the
+                // native builder, whose setters assume well-formed uniform data.
+                for &(name, value) in bindings.uniforms {
+                    let result = match value {
+                        UniformValue::Float(values) => builder.set_uniform_float(name, values),
+                        UniformValue::Int(values) => builder.set_uniform_int(name, values),
+                    };
+                    result.map_err(|_| ShaderError::InvalidUniform {
+                        name: name.into(),
+                        reason: "unsupported image-filter uniform size",
+                    })?;
+                }
+                let filter = sk::image_filters::runtime_shader_with_options(
+                    &builder,
+                    input.sample_radius,
+                    input.input,
+                    None,
+                    false,
+                )
+                .ok_or(ShaderError::CreateShader)?;
+                drop(registry);
+                return Ok(self.register_image_filter(filter));
+            }
+            if bindings.image_filter.is_some() {
+                return Err(ShaderError::InvalidImageFilter(
+                    "only image filters accept dynamic input configuration",
+                ));
+            }
+
             let mut children = vec![None; effect.children().len()];
             for &(name, handle) in bindings.children {
                 let invalid = |reason| ShaderError::InvalidChild {
@@ -202,9 +353,17 @@ impl ShaderFactory for SkiaShaderRegistry {
                 }
                 let shader = registry
                     .shaders
-                    .get(handle)
-                    .ok_or_else(|| ShaderError::UnboundShader(handle.clone()))?;
-                *slot = Some(ChildPtr::Shader(shader.clone()));
+                    .get(&handle)
+                    .ok_or(ShaderError::UnboundShader(handle))?;
+                *slot = Some(match (child.ty(), shader) {
+                    (ChildType::Shader, BoundEffect::Shader(shader)) => {
+                        ChildPtr::Shader(shader.clone())
+                    }
+                    (ChildType::ColorFilter, BoundEffect::ColorFilter(filter)) => {
+                        ChildPtr::ColorFilter(filter.clone())
+                    }
+                    _ => return Err(invalid("instance kind does not match child declaration")),
+                });
             }
             for child in effect.children() {
                 if children[child.index()].is_none() {
@@ -215,11 +374,22 @@ impl ShaderFactory for SkiaShaderRegistry {
                 }
             }
             let children = children.into_iter().flatten().collect::<Vec<_>>();
-            effect
-                .make_shader(sk::Data::new_copy(&data), &children, None)
-                .ok_or(ShaderError::CreateShader)?
+            let data = sk::Data::new_copy(&data);
+            match program.layout.kind {
+                ShaderKind::Shader => BoundEffect::Shader(
+                    effect
+                        .make_shader(data, &children, None)
+                        .ok_or(ShaderError::CreateShader)?,
+                ),
+                ShaderKind::ColorFilter => BoundEffect::ColorFilter(
+                    effect
+                        .make_color_filter(data, children.as_slice())
+                        .ok_or(ShaderError::CreateShader)?,
+                ),
+                _ => return Err(ShaderError::UnsupportedSource),
+            }
         };
-        Ok(self.register_shader(shader))
+        Ok(self.register(shader))
     }
 }
 

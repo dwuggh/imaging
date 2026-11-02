@@ -441,6 +441,25 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// Whether this recording or a referenced mask uses a shader filter.
+    #[must_use]
+    pub fn has_shader_filters(&self) -> bool {
+        self.commands.iter().any(|command| match *command {
+            Command::PushGroup(id) => {
+                let group = self.group(id);
+                group
+                    .filters
+                    .iter()
+                    .any(|filter| matches!(filter, crate::Filter::Shader(_)))
+                    || group
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| self.mask(mask.mask).scene.has_shader_filters())
+            }
+            _ => false,
+        })
+    }
+
     /// Whether this recording or a referenced mask uses a shader brush.
     #[must_use]
     pub fn has_shader_brushes(&self) -> bool {

@@ -7,7 +7,7 @@
 
 use imaging::{Brush, Composite, Painter, ShaderBrush, record::Scene};
 use imaging_shader_ext::{
-    ShaderBindings, ShaderDesc, ShaderError, ShaderFactory, ShaderSource, UniformValue,
+    ShaderBindings, ShaderDesc, ShaderError, ShaderFactory, ShaderKind, ShaderSource, UniformValue,
 };
 use imaging_skia::{SkiaConfig, SkiaCpuRenderer, SkiaShaderRegistry};
 use kurbo::{Affine, Rect, RoundedRect, Stroke};
@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let program = shaders.create_program(ShaderDesc {
         label: Some("diagonal stripes"),
         source: ShaderSource::SkSl(STRIPES),
+        kind: ShaderKind::Shader,
     })?;
 
     // Bind two immutable instances of the same program. Values are copied here;
@@ -56,6 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ("color_b", UniformValue::Float(&[0.95, 0.25, 0.40, 1.0])),
                 ],
                 children: &[],
+                image_filter: None,
             },
         )?;
         Ok(Brush::Shader(ShaderBrush { shader }))
